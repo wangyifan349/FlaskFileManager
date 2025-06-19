@@ -1,96 +1,172 @@
-{% extends "base.html" %}
+{% extends 'base.html' %}
+{% block title %}文件管理{% endblock %}
 {% block body %}
-<div class="mb-3">
-  <span>Logged in as {{ username }}</span>
-  <a href="{{ url_for('logout') }}" class="btn btn-sm btn-secondary">Logout</a>
+<div class="d-flex justify-content-between mb-3">
+  <div>当前用户：{{ username }}</div>
+  <div><a href="{{ url_for('logout') }}" class="btn btn-sm btn-secondary">退出</a></div>
 </div>
-<h1>File Manager</h1>
-<nav><ol class="breadcrumb">
-  <li class="breadcrumb-item"><a href="{{ url_for('index') }}">Home</a></li>
-  {% if cur_path %}
-    {% set parts=cur_path.split('/') %}
-    {% for i in range(parts|length) %}
-      <li class="breadcrumb-item">
-        <a href="{{ url_for('index', subpath=parts[:i+1]|join('/')) }}">{{ parts[i] }}</a>
-      </li>
-    {% endfor %}
-  {% endif %}
-</ol></nav>
+<h1 class="mb-3">文件管理</h1>
+<nav>
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="{{ url_for('index') }}">Home</a></li>
+    {% if cur_path %}
+      {% set parts = cur_path.split('/') %}
+      {% for i in range(parts|length) %}
+        <li class="breadcrumb-item">
+          <a href="{{ url_for('index', subpath=parts[:i+1]|join('/')) }}">{{ parts[i] }}</a>
+        </li>
+      {% endfor %}
+    {% endif %}
+  </ol>
+</nav>
 
-<div id="dropzone" class="mb-3">Drag files here or click to upload
-  <input id="fileInput" type="file" multiple style="display:none">
-</div>
-<button id="btnNewFolder" class="btn btn-sm btn-secondary mb-3">New Folder</button>
+<div id="dropzone">拖拽或点击上传<input id="fileInput" type="file" multiple style="display:none"></div>
+<button id="btnNewFolder" class="btn btn-sm btn-secondary mb-3">新建文件夹</button>
 
 <table class="table table-striped">
-  <thead><tr><th>Name</th><th>Type</th><th>Actions</th></tr></thead>
+  <thead><tr><th>名称</th><th>类型</th><th>操作</th></tr></thead>
   <tbody id="fileList">
-    {% for item in entries %}
-    <tr data-name="{{ item.name }}" data-isdir="{{ item.isdir }}">
+    {% for e in entries %}
+    <tr data-name="{{ e.name }}" data-isdir="{{ e.is_dir }}">
       <td>
-        {% if item.isdir %}
-          📁 <a href="{{ url_for('index', subpath=(cur_path + '/' + item.name).lstrip('/')) }}">{{ item.name }}</a>
+        {% if e.is_dir %}
+          📁 <a href="{{ url_for('index', subpath=(cur_path + '/' + e.name).lstrip('/')) }}">{{ e.name }}</a>
         {% else %}
-          📄 {{ item.name }}
+          📄 {{ e.name }}
         {% endif %}
       </td>
-      <td>{{ 'Folder' if item.isdir else 'File' }}</td>
+      <td>{{ '文件夹' if e.is_dir else '文件' }}</td>
       <td>
-        {% if not item.isdir %}
-          <a href="{{ url_for('download', subpath=cur_path, filename=item.name) }}"
-             class="btn btn-sm btn-outline-primary">Download</a>
+        {% if not e.is_dir %}
+          <a href="{{ url_for('download', subpath=cur_path, filename=e.name) }}" class="btn btn-sm btn-outline-primary">下载</a>
+          {% if e.name.lower().endswith(('.mp4','.webm')) %}
+            <button class="btn btn-sm btn-outline-success play-video">播放视频</button>
+          {% elif e.name.lower().endswith(('.mp3','.wav')) %}
+            <button class="btn btn-sm btn-outline-success play-audio">播放音频</button>
+          {% elif e.name.lower().endswith(('.txt','.md','.py','.html')) %}
+            <button class="btn btn-sm btn-outline-warning edit-file">编辑</button>
+          {% endif %}
         {% endif %}
       </td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
+
+<ul id="ctxMenu">
+  <li id="ctxRename">重命名</li>
+  <li id="ctxDelete">删除</li>
+</ul>
+
+<!-- 编辑/播放 模态框 -->
+<div class="modal fade" id="modal" tabindex="-1"><div class="modal-dialog modal-lg">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h5 class="modal-title" id="modalTitle"></h5>
+      <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-footer" id="modalFoot"></div>
+  </div>
+</div></div>
 {% endblock %}
 
 {% block script %}
 <script>
-let curPath="{{ cur_path }}", sel=null;
+let curPath = "{{ cur_path }}", selectedRow = null;
+
+// 拖拽 / 点击 上传
 $("#dropzone")
-  .on("click",()=>$("#fileInput").click())
-  .on("dragover",e=>e.preventDefault())
-  .on("drop",e=>{e.preventDefault();upload(e.originalEvent.dataTransfer.files);});
-$("#fileInput").on("change",e=>upload(e.target.files));
-function upload(files){
-  let f=new FormData();
-  for(let x of files)f.append("file",x);
-  f.append("path",curPath);
-  $.ajax({url:"/upload",type:"POST",data:f,processData:false,contentType:false})
-    .done(()=>location.reload())
-    .fail(err=>alert(err.responseText));
+  .on("click", ()=> $("#fileInput").click())
+  .on("dragover", e=>{ e.preventDefault(); })
+  .on("drop", e=>{ e.preventDefault(); upload(e.originalEvent.dataTransfer.files); });
+$("#fileInput").on("change", e=> upload(e.target.files));
+
+function upload(files) {
+  let fd = new FormData();
+  for(let f of files) fd.append("file", f);
+  fd.append("path", curPath);
+  $.ajax({ url:"/upload", type:"POST", data:fd, processData:false, contentType:false })
+    .done(()=>location.reload()).fail(err=>alert(err.responseText));
 }
 
+// 新建文件夹
 $("#btnNewFolder").click(()=>{
-  let n=prompt("Folder name");if(!n)return;
-  $.ajax({url:"/mkdir",type:"POST",contentType:"application/json",
-    data:JSON.stringify({path:curPath,name:n})})
-    .done(()=>location.reload()).fail(e=>alert(e.responseText));
+  let name = prompt("文件夹名称：");
+  if(!name) return;
+  $.ajax({
+    url:"/mkdir", type:"POST", contentType:"application/json",
+    data: JSON.stringify({ path:curPath, name:name })
+  }).done(()=>location.reload()).fail(err=>alert(err.responseText));
 });
 
-$(document).on("contextmenu","tr",function(e){
-  e.preventDefault();sel=$(this);
-  $("#ctx").css({top:e.pageY,left:e.pageX}).show();
+// 右键菜单
+$(document).on("contextmenu", "tr", function(e){
+  e.preventDefault(); selectedRow = $(this);
+  $("#ctxMenu").css({ top:e.pageY, left:e.pageX }).show();
 });
-$(document).click(()=>$("#ctx").hide());
+$(document).click(()=> $("#ctxMenu").hide());
 
+// 重命名
 $("#ctxRename").click(()=>{
-  let old=sel.data("name"),nw=prompt("New name",old);
-  if(!nw||nw===old)return;
-  $.ajax({url:"/rename",type:"POST",contentType:"application/json",
-    data:JSON.stringify({path:curPath,old:old,new:nw})})
-    .done(()=>location.reload()).fail(e=>alert(e.responseText));
+  let oldName = selectedRow.data("name");
+  let newName = prompt("新名称：", oldName);
+  if(!newName||newName===oldName) return;
+  $.ajax({
+    url:"/rename", type:"POST", contentType:"application/json",
+    data: JSON.stringify({ path:curPath, old:oldName, new:newName })
+  }).done(()=>location.reload()).fail(err=>alert(err.responseText));
 });
 
+// 删除
 $("#ctxDelete").click(()=>{
-  let nm=sel.data("name"),isd=sel.data("isdir");
-  if(!confirm("Delete?"))return;
-  $.ajax({url:"/delete",type:"POST",contentType:"application/json",
-    data:JSON.stringify({path:curPath,name:nm,isdir:isd})})
-    .done(()=>location.reload()).fail(e=>alert(e.responseText));
+  let name = selectedRow.data("name");
+  let isdir = selectedRow.data("isdir");
+  if(!confirm("确认删除？"))return;
+  $.ajax({
+    url:"/delete", type:"POST", contentType:"application/json",
+    data: JSON.stringify({ path:curPath, name:name, isdir:isdir })
+  }).done(()=>location.reload()).fail(err=>alert(err.responseText));
+});
+
+// 编辑文本
+$(document).on("click", ".edit-file", function(){
+  let name = $(this).closest("tr").data("name");
+  $.get("/edit", { path:curPath, file:name }, data=>{
+    $("#modalTitle").text("编辑：" + name);
+    $("#modalBody").html('<textarea id="editor" class="form-control" rows="15"></textarea>');
+    $("#editor").val(data);
+    $("#modalFoot").html('<button id="saveEdit" class="btn btn-primary">保存</button>');
+    new bootstrap.Modal($("#modal")).show();
+    $("#saveEdit").click(()=>{
+      $.ajax({
+        url:"/edit", type:"POST", contentType:"application/json",
+        data: JSON.stringify({ path:curPath, file:name, content:$("#editor").val() })
+      }).done(()=>location.reload()).fail(err=>alert(err.responseText));
+    });
+  });
+});
+
+// 播放视频
+$(document).on("click", ".play-video", function(){
+  let name = $(this).closest("tr").data("name");
+  $("#modalTitle").text("视频：" + name);
+  $("#modalBody").html(
+    `<video controls style="width:100%" src="/media/${encodeURIComponent(curPath)}/${encodeURIComponent(name)}"></video>`
+  );
+  $("#modalFoot").html('');
+  new bootstrap.Modal($("#modal")).show();
+});
+
+// 播放音频
+$(document).on("click", ".play-audio", function(){
+  let name = $(this).closest("tr").data("name");
+  $("#modalTitle").text("音频：" + name);
+  $("#modalBody").html(
+    `<audio controls style="width:100%" src="/media/${encodeURIComponent(curPath)}/${encodeURIComponent(name)}"></audio>`
+  );
+  $("#modalFoot").html('');
+  new bootstrap.Modal($("#modal")).show();
 });
 </script>
 {% endblock %}
