@@ -1,156 +1,230 @@
 import os
 import sqlite3
-from functools import wraps
-from flask import Flask, request, redirect, url_for, session, g, send_from_directory, render_template
+import shutil
+from flask import (Flask, g, render_template, request, redirect,
+                   url_for, session, send_from_directory, jsonify, flash)
+from flask_login import (LoginManager, login_user, logout_user,
+                         login_required, current_user, UserMixin)
+from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 
-# 初始化
+# --- 配置 ---
+BASE_DIR      = os.path.abspath(os.path.dirname(__file__))
+UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
+DB_PATH       = os.path.join(BASE_DIR, 'app.db')
+SECRET_KEY    = 'change-this-secret'
+ALLOWED_EXT    = set(['txt','md','py','html','mp4','webm','mp3','wav','jpg','png'])
+
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# --- Flask & 登录管理 ---
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'change-this-secret')
+app.secret_key = SECRET_KEY
+login_mgr = LoginManager(app)
+login_mgr.login_view = 'login'
 
-# 路径配置
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-UPLOAD_ROOT = os.path.join(BASE_DIR, 'uploads')
-DB_PATH = os.path.join(BASE_DIR, 'app.db')
-os.makedirs(UPLOAD_ROOT, exist_ok=True)
+# --- 用户模型（sqlite3 + flask-login） ---
+class User(UserMixin):
+    def __init__(self, id_, username, pwd_hash):
+        self.id = id_
+        self.username = username
+        self.pwd_hash = pwd_hash
 
-# DB 工具
+    def check_password(self, password):
+        return check_password_hash(self.pwd_hash, password)
+
+@login_mgr.user_loader
+def load_user(user_id):
+    con = get_db()
+    row = con.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    if not row: return None
+    return User(row['id'], row['username'], row['password'])
+
+# --- DB 辅助 ---
 def get_db():
-    if 'db' not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-    return g.db
+    db = getattr(g, '_db', None)
+    if db is None:
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        g._db = db
+    return db
 
 @app.teardown_appcontext
 def close_db(exc):
-    db = g.pop('db', None)
+    db = getattr(g, '_db', None)
     if db: db.close()
 
 def init_db():
     db = get_db()
-    db.execute('''
+    db.execute("""
       CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         username TEXT UNIQUE NOT NULL,
+         password TEXT NOT NULL
       )
-    ''')
+    """)
     db.commit()
 
-# 安全路径
-def safe_path(sub=''):
-    path = os.path.normpath(os.path.join(UPLOAD_ROOT, sub))
-    if not path.startswith(UPLOAD_ROOT):
+# --- 路径安全 ---
+def safe_path(subpath=''):
+    # 规范化并禁止跳出 UPLOAD_FOLDER
+    full = os.path.normpath(os.path.join(UPLOAD_FOLDER, subpath))
+    if not full.startswith(UPLOAD_FOLDER):
         raise ValueError("Invalid path")
-    return path
+    return full
 
-# 登录装饰
-def login_required(f):
-    @wraps(f)
-    def wrapped(*a, **kw):
-        if 'user_id' not in session:
-            return redirect(url_for('login'))
-        return f(*a, **kw)
-    return wrapped
+def allowed_file(fname):
+    ext = fname.rsplit('.',1)[-1].lower()
+    return '.' in fname and ext in ALLOWED_EXT
 
-# 启动时初始化 DB
+# --- 启动前建表 ---
 with app.app_context():
     init_db()
 
-# --- Auth ---
+# --- 认证路由 ---
 @app.route('/register', methods=['GET','POST'])
 def register():
     if request.method=='POST':
-        u = request.form['username']
+        u = request.form['username'].strip()
         p = request.form['password']
-        try:
-            get_db().execute(
-              "INSERT INTO users(username,password) VALUES(?,?)", (u,p)
-            )
-            get_db().commit()
-            return redirect(url_for('login'))
-        except sqlite3.IntegrityError:
-            return "User exists", 400
+        if not u or not p:
+            flash("用户名/密码不能为空", "warning")
+        else:
+            db = get_db()
+            try:
+                db.execute("INSERT INTO users(username,password) VALUES(?,?)",
+                           (u, generate_password_hash(p)))
+                db.commit()
+                flash("注册成功，请登录", "success")
+                return redirect(url_for('login'))
+            except sqlite3.IntegrityError:
+                flash("用户名已存在", "danger")
     return render_template('register.html')
 
 @app.route('/login', methods=['GET','POST'])
 def login():
     if request.method=='POST':
-        u,p = request.form['username'], request.form['password']
+        u = request.form['username'].strip()
+        p = request.form['password']
         row = get_db().execute(
-          "SELECT * FROM users WHERE username=? AND password=?", (u,p)
+            "SELECT * FROM users WHERE username=?", (u,)
         ).fetchone()
-        if row:
-            session['user_id'], session['username'] = row['id'], row['username']
+        if row and check_password_hash(row['password'], p):
+            user = User(row['id'], row['username'], row['password'])
+            login_user(user)
             return redirect(url_for('index'))
-        return "Invalid", 400
+        flash("用户名或密码错误", "danger")
     return render_template('login.html')
 
 @app.route('/logout')
+@login_required
 def logout():
-    session.clear()
+    logout_user()
     return redirect(url_for('login'))
 
-# --- File Manager ---
+# --- 文件管理路由 ---
 @app.route('/', defaults={'subpath': ''})
 @app.route('/<path:subpath>')
 @login_required
 def index(subpath):
-    base = safe_path(subpath)
-    entries = sorted(os.listdir(base))
-    items = []
-    for name in entries:
-        full = os.path.join(base, name)
-        items.append({'name': name, 'isdir': os.path.isdir(full)})
-    return render_template('index.html',
+    try:
+        base = safe_path(subpath)
+    except:
+        return "路径非法", 400
+    items=[]
+    for name in sorted(os.listdir(base)):
+        path_full = os.path.join(base, name)
+        items.append({
+            'name': name,
+            'is_dir': os.path.isdir(path_full)
+        })
+    return render_template('file_manager.html',
                            entries=items,
                            cur_path=subpath,
-                           username=session['username'])
+                           username=current_user.username)
 
 @app.route('/upload', methods=['POST'])
 @login_required
 def upload():
     sub = request.form.get('path','')
-    dst = safe_path(sub)
-    f = request.files.get('file')
-    if not f: return "No file", 400
-    f.save(os.path.join(dst, f.filename))
-    return "OK"
+    file = request.files.get('file')
+    if not file or file.filename=='':
+        return "没选文件", 400
+    if not allowed_file(file.filename):
+        return "不支持的文件类型", 400
+    fn = secure_filename(file.filename)
+    dest = safe_path(sub)
+    file.save(os.path.join(dest, fn))
+    return "OK", 200
 
 @app.route('/mkdir', methods=['POST'])
 @login_required
 def mkdir():
     j = request.get_json()
-    dst = safe_path(j.get('path',''))
-    nm = j.get('name','').strip()
-    if not nm: return "Name empty", 400
-    os.makedirs(os.path.join(dst,nm), exist_ok=False)
-    return "OK"
+    name = secure_filename(j.get('name','').strip())
+    if not name:
+        return "名称不能为空", 400
+    dest = safe_path(j.get('path',''))
+    try:
+        os.makedirs(os.path.join(dest, name), exist_ok=False)
+        return "OK", 200
+    except FileExistsError:
+        return "已存在同名文件/文件夹", 400
 
 @app.route('/rename', methods=['POST'])
 @login_required
 def rename():
     j = request.get_json()
     base = safe_path(j.get('path',''))
-    old, new = os.path.join(base,j['old']), os.path.join(base,j['new'])
-    if not os.path.exists(old): return "Not found", 404
-    os.rename(old,new)
-    return "OK"
+    old = os.path.join(base, j.get('old',''))
+    new = os.path.join(base, secure_filename(j.get('new','')))
+    if not os.path.exists(old):
+        return "不存在", 404
+    os.rename(old, new)
+    return "OK", 200
 
 @app.route('/delete', methods=['POST'])
 @login_required
 def delete():
     j = request.get_json()
     base = safe_path(j.get('path',''))
-    target = os.path.join(base, j['name'])
-    if j.get('isdir'): os.rmdir(target)
-    else:               os.remove(target)
-    return "OK"
+    target = os.path.join(base, j.get('name',''))
+    if j.get('isdir'):
+        shutil.rmtree(target)
+    else:
+        os.remove(target)
+    return "OK", 200
 
 @app.route('/download/<path:subpath>/<path:filename>')
 @login_required
 def download(subpath, filename):
-    base = safe_path(subpath)
-    return send_from_directory(base, filename, as_attachment=True)
+    d = safe_path(subpath)
+    return send_from_directory(d, filename, as_attachment=True)
 
-if __name__=='__main__':
+@app.route('/media/<path:subpath>/<path:filename>')
+@login_required
+def media(subpath, filename):
+    d = safe_path(subpath)
+    return send_from_directory(d, filename)
+
+@app.route('/edit', methods=['GET','POST'])
+@login_required
+def edit():
+    if request.method=='GET':
+        p = safe_path(request.args.get('path',''))
+        f = request.args.get('file','')
+        try:
+            return open(os.path.join(p,f), encoding='utf-8').read()
+        except:
+            return "读取出错", 500
+    data = request.get_json()
+    p = safe_path(data.get('path',''))
+    f = data.get('file','')
+    try:
+        open(os.path.join(p,f), 'w', encoding='utf-8').write(data.get('content',''))
+        return "OK", 200
+    except:
+        return "写入出错", 500
+
+if __name__ == '__main__':
     app.run(debug=True)
