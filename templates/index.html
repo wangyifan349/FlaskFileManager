@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="mb-3">
+  <span>Logged in as {{ username }}</span>
+  <a href="{{ url_for('logout') }}" class="btn btn-sm btn-secondary">Logout</a>
+</div>
+<h1>File Manager</h1>
+<nav><ol class="breadcrumb">
+  <li class="breadcrumb-item"><a href="{{ url_for('index') }}">Home</a></li>
+  {% if cur_path %}
+    {% set parts=cur_path.split('/') %}
+    {% for i in range(parts|length) %}
+      <li class="breadcrumb-item">
+        <a href="{{ url_for('index', subpath=parts[:i+1]|join('/')) }}">{{ parts[i] }}</a>
+      </li>
+    {% endfor %}
+  {% endif %}
+</ol></nav>
+
+<div id="dropzone" class="mb-3">Drag files here or click to upload
+  <input id="fileInput" type="file" multiple style="display:none">
+</div>
+<button id="btnNewFolder" class="btn btn-sm btn-secondary mb-3">New Folder</button>
+
+<table class="table table-striped">
+  <thead><tr><th>Name</th><th>Type</th><th>Actions</th></tr></thead>
+  <tbody id="fileList">
+    {% for item in entries %}
+    <tr data-name="{{ item.name }}" data-isdir="{{ item.isdir }}">
+      <td>
+        {% if item.isdir %}
+          📁 <a href="{{ url_for('index', subpath=(cur_path + '/' + item.name).lstrip('/')) }}">{{ item.name }}</a>
+        {% else %}
+          📄 {{ item.name }}
+        {% endif %}
+      </td>
+      <td>{{ 'Folder' if item.isdir else 'File' }}</td>
+      <td>
+        {% if not item.isdir %}
+          <a href="{{ url_for('download', subpath=cur_path, filename=item.name) }}"
+             class="btn btn-sm btn-outline-primary">Download</a>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
+
+{% block script %}
+<script>
+let curPath="{{ cur_path }}", sel=null;
+$("#dropzone")
+  .on("click",()=>$("#fileInput").click())
+  .on("dragover",e=>e.preventDefault())
+  .on("drop",e=>{e.preventDefault();upload(e.originalEvent.dataTransfer.files);});
+$("#fileInput").on("change",e=>upload(e.target.files));
+function upload(files){
+  let f=new FormData();
+  for(let x of files)f.append("file",x);
+  f.append("path",curPath);
+  $.ajax({url:"/upload",type:"POST",data:f,processData:false,contentType:false})
+    .done(()=>location.reload())
+    .fail(err=>alert(err.responseText));
+}
+
+$("#btnNewFolder").click(()=>{
+  let n=prompt("Folder name");if(!n)return;
+  $.ajax({url:"/mkdir",type:"POST",contentType:"application/json",
+    data:JSON.stringify({path:curPath,name:n})})
+    .done(()=>location.reload()).fail(e=>alert(e.responseText));
+});
+
+$(document).on("contextmenu","tr",function(e){
+  e.preventDefault();sel=$(this);
+  $("#ctx").css({top:e.pageY,left:e.pageX}).show();
+});
+$(document).click(()=>$("#ctx").hide());
+
+$("#ctxRename").click(()=>{
+  let old=sel.data("name"),nw=prompt("New name",old);
+  if(!nw||nw===old)return;
+  $.ajax({url:"/rename",type:"POST",contentType:"application/json",
+    data:JSON.stringify({path:curPath,old:old,new:nw})})
+    .done(()=>location.reload()).fail(e=>alert(e.responseText));
+});
+
+$("#ctxDelete").click(()=>{
+  let nm=sel.data("name"),isd=sel.data("isdir");
+  if(!confirm("Delete?"))return;
+  $.ajax({url:"/delete",type:"POST",contentType:"application/json",
+    data:JSON.stringify({path:curPath,name:nm,isdir:isd})})
+    .done(()=>location.reload()).fail(e=>alert(e.responseText));
+});
+</script>
+{% endblock %}
