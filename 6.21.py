@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 app.py — 单文件云盘示例，含分享链接（30 天有效）
+前端界面使用“面包屑 + 列表”视图，Bootstrap + Font Awesome 美化。
 依赖:
     pip install Flask Flask-Login Flask-SQLAlchemy itsdangerous Werkzeug
 运行:
@@ -43,7 +44,7 @@ app.config.update({
     'MAX_CONTENT_LENGTH': 100 * 1024 * 1024,       # 限制单文件 100MB
 })
 
-# 30 天（单位：秒）分享 Token
+# 分享 Token：30 天（以秒为单位）
 share_serializer = TimedSerializer(app.config['SECRET_KEY'], expires_in=2592000)
 
 # ----------------------------
@@ -54,11 +55,9 @@ login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 
 # ----------------------------
-# 简单文件名过滤
+# 简单文件名过滤（保留中英文、数字、点、下划线、连字符、空格）
 # ----------------------------
-# 允许中英文、数字、点、下划线、连字符、空格
 _filename_re = re.compile(r'[^A-Za-z0-9\u4e00-\u9fa5\.\-_ ]+')
-
 def sanitize_filename(filename: str) -> str:
     name = os.path.basename(filename)
     name = _filename_re.sub('', name)
@@ -81,7 +80,7 @@ def load_user(user_id):
     return User.query.get(int(user_id))
 
 # ----------------------------
-# 辅助：当前用户根目录
+# 当前用户根目录帮助
 # ----------------------------
 def user_base():
     path = os.path.join(app.config['UPLOAD_FOLDER'], str(current_user.id))
@@ -135,7 +134,7 @@ def index():
     return render_template_string(TPL_BASE, body=TPL_INDEX)
 
 # ----------------------------
-# API：目录树
+# API：目录树（返回整棵树，前端按需渲染）
 # ----------------------------
 @app.route('/api/tree')
 @login_required
@@ -149,7 +148,6 @@ def api_tree():
             node = {
                 'id':      os.path.join(rel, name).replace('\\','/'),
                 'text':    name,
-                'icon':    'jstree-folder' if os.path.isdir(full) else 'jstree-file',
                 'size':    stat.st_size,
                 'mtime':   datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M'),
                 'children': []
@@ -159,7 +157,7 @@ def api_tree():
             items.append(node)
         return items
 
-    tree = [{'id':'', 'text':'根目录', 'children': walk(base)}]
+    tree = [{'id':'', 'text':'根', 'children': walk(base)}]
     return jsonify(tree)
 
 # ----------------------------
@@ -221,7 +219,7 @@ def download_shared(token):
     return send_from_directory(d, fn, as_attachment=True)
 
 # ----------------------------
-# API：新建 / 删除 / 重命名 / 移动 / 复制
+# API：文件/目录操作（新建/删除/重命名/移动/复制）
 # ----------------------------
 @app.route('/api/mkdir', methods=['POST'])
 @login_required
@@ -295,18 +293,29 @@ def api_copy():
     return 'OK', 200
 
 # ----------------------------
-# HTML + JS 模板
+# HTML + JS 模板：美化后的界面
 # ----------------------------
 TPL_BASE = """
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
-  <title>Flask 云盘（含分享链接）</title>
-  <link rel="stylesheet"
-    href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css">
-  <link rel="stylesheet"
-    href="https://cdn.jsdelivr.net/npm/jstree@3.3.12/dist/themes/default/style.min.css" />
+  <title>Flask 云盘（列表视图）</title>
+  <!-- Bootstrap -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css">
+  <!-- Font Awesome 图标 -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@5.15.4/css/all.min.css">
   <style>
-    #jstree { height:400px; overflow:auto; border:1px solid #ddd; padding:10px; }
+    /* 容器内边距 */
+    #file-browser { padding:1rem; }
+    /* 面包屑分隔符 */
+    .breadcrumb-item + .breadcrumb-item::before { content: "›"; }
+    /* 列表项悬停效果 */
+    .file-item { cursor: pointer; }
+    .file-item:hover { background:#f8f9fa; }
+    /* 文件名过长省略 */
+    .file-name { display:inline-block; max-width:200px; white-space:nowrap;
+                 overflow:hidden; text-overflow:ellipsis; vertical-align:middle; }
+    /* 操作按钮组 */
+    .item-actions button { margin-left:0.3rem; }
   </style>
 </head><body>
 <nav class="navbar navbar-light bg-light">
@@ -326,12 +335,11 @@ TPL_BASE = """
   {% endwith %}
   {{ body|safe }}
 </div>
-
+<!-- jQuery + Bootstrap JS -->
 <script src="https://cdn.jsdelivr.net/npm/jquery@3.5.1/dist/jquery.slim.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/jstree@3.3.12/dist/jstree.min.js"></script>
 <script>
-// 通用 POST
+// 通用 POST 函数
 function postForm(u, d){
   return fetch(u, {
     method:'POST',
@@ -340,126 +348,146 @@ function postForm(u, d){
   }).then(r=>r.text().then(t=>{ if(!r.ok) throw t; return t; }));
 }
 
-// 刷新目录树
-function refreshTree(){
-  fetch('/api/tree').then(r=>r.json()).then(tree=>{
-    $('#jstree').jstree('destroy').jstree({
-      core:{ data: tree, check_callback:true },
-      plugins:['dnd','contextmenu'],
-      contextmenu:{
-        items: node => {
-          let base = {
-            mkdir:{
-              label:'新建文件夹',
-              action:()=>{
-                let name=prompt('名称');
-                if(!name) return;
-                postForm('/api/mkdir',{path:node.id,name})
-                  .then(refreshTree).catch(alert);
-              }
-            },
-            rename:{
-              label:'重命名',
-              action:()=>{
-                let name=prompt('新名称', node.text);
-                if(!name) return;
-                postForm('/api/rename',{src:node.id,name})
-                  .then(refreshTree).catch(alert);
-              }
-            },
-            delete:{
-              label:'删除',
-              action:()=>{
-                if(!confirm('确认删除？')) return;
-                postForm('/api/delete',{path:node.id})
-                  .then(refreshTree).catch(alert);
-              }
-            },
-            copy:{
-              label:'复制到...',
-              action:()=>{
-                let dst=prompt('目标路径');
-                if(!dst) return;
-                postForm('/api/copy',{src:node.id,dst})
-                  .then(refreshTree).catch(alert);
-              }
-            },
-            upload:{
-              label:'上传文件',
-              action:()=>{
-                let inp=document.createElement('input');
-                inp.type='file';
-                inp.onchange=()=>{
-                  let f=inp.files[0];
-                  if(!f) return;
-                  let fd=new FormData();
-                  fd.append('file',f);
-                  fd.append('path',node.id);
-                  fetch('/api/upload',{method:'POST',body:fd})
-                    .then(r=>r.text().then(t=>{
-                      if(!r.ok) throw t;
-                      alert('上传成功');
-                      refreshTree();
-                    })).catch(alert);
-                };
-                inp.click();
-              }
-            }
-          };
-          if(node.icon==='jstree-file'){
-            base.download={
-              label:'下载',
-              action:()=> location='/api/download?path='+encodeURIComponent(node.id)
-            };
-            base.share={
-              label:'生成分享链接',
-              action:()=>{
-                postForm('/api/share',{path:node.id})
-                  .then(txt=>{
-                    let j=JSON.parse(txt);
-                    prompt('分享链接（30天有效）', j.url);
-                  }).catch(alert);
-              }
-            };
-          }
-          return base;
-        }
+let treeData = {};      // 缓存整棵目录树
+let currentPath = '';   // 当前相对路径
+
+// 加载整棵目录树
+function loadTree(){
+  return fetch('/api/tree')
+    .then(r=>r.json())
+    .then(arr=>{
+      treeData = {};
+      function flatten(nodes){
+        nodes.forEach(n=>{
+          treeData[n.id] = n;
+          if(n.children && n.children.length>0) flatten(n.children);
+        });
       }
-    })
-    // 拖拽移动
-    .on('move_node.jstree', (e, d)=>{
-      let src = (d.old_parent=='#'?'':d.old_parent+'/') + d.node.text;
-      let dst = (d.new_parent=='#'?'':d.new_parent+'/') + d.node.text;
-      postForm('/api/move',{src,dst})
-        .then(refreshTree).catch(alert);
-    })
-    // 双击下载
-    .on('dblclick.jstree', (e, dt)=>{
-      let inst = $('#jstree').jstree(true);
-      let n = inst.get_node(e.target);
-      if(n.icon==='jstree-file'){
-        location = '/api/download?path=' + encodeURIComponent(n.id);
-      }
+      flatten(arr[0].children);
     });
+}
+
+// 渲染面包屑
+function renderBreadcrumb(){
+  let container = $('#breadcrumb').empty();
+  let parts = currentPath ? currentPath.split('/') : [];
+  // 根目录
+  container.append(
+    `<li class="breadcrumb-item${parts.length? '' : ' active'}"
+         ${parts.length? 'data-path=""' : ''}>根目录</li>`
+  );
+  let accum = '';
+  parts.forEach((p,i)=>{
+    accum = accum? accum + '/' + p : p;
+    let active = (i===parts.length-1)? ' active': '';
+    let attr = (i===parts.length-1)? '' : `data-path="${accum}"`;
+    container.append(
+      `<li class="breadcrumb-item${active}" ${attr}>${p}</li>`
+    );
   });
 }
 
+// 渲染当前目录列表
+function renderList(){
+  let list = $('#file-list').empty();
+  let children = treeData[currentPath]? treeData[currentPath].children : [];
+  // 先文件夹后文件，并按名称排序
+  children.sort((a,b)=>{
+    let fa = !!a.children, fb = !!b.children;
+    if(fa !== fb) return fa? -1:1;
+    return a.text.localeCompare(b.text);
+  });
+  children.forEach(item=>{
+    let isFolder = Array.isArray(item.children);
+    let icon = isFolder? 'fa-folder': 'fa-file';
+    let li = $(`
+      <li class="list-group-item file-item" data-id="${item.id}">
+        <i class="fas ${icon} mr-2"></i>
+        <span class="file-name">${item.text}</span>
+        <div class="item-actions">
+          ${isFolder
+            ? `<button class="btn btn-sm btn-outline-primary btn-open-folder" title="打开">
+                 <i class="fas fa-folder-open"></i></button>`
+            : `<button class="btn btn-sm btn-outline-success btn-download" title="下载">
+                 <i class="fas fa-download"></i></button>
+               <button class="btn btn-sm btn-outline-info btn-share" title="分享">
+                 <i class="fas fa-link"></i></button>`
+          }
+          <button class="btn btn-sm btn-outline-secondary btn-rename" title="重命名">
+            <i class="fas fa-edit"></i></button>
+          <button class="btn btn-sm btn-outline-danger btn-delete" title="删除">
+            <i class="fas fa-trash"></i></button>
+        </div>
+      </li>`);
+    list.append(li);
+  });
+}
+
+// 切换到某个路径
+function goPath(path){
+  currentPath = path;
+  renderBreadcrumb();
+  renderList();
+}
+
 $(function(){
+  // 初次加载
+  loadTree().then(_=> goPath(''));
+
+  // 面包屑点击跳转
+  $('#breadcrumb').on('click','li[data-path]', function(){
+    goPath($(this).data('path'));
+  });
+
+  // 打开文件夹
+  $('#file-list').on('click','.btn-open-folder', function(){
+    let id = $(this).closest('li').data('id');
+    goPath(id);
+  });
+
+  // 下载文件
+  $('#file-list').on('click','.btn-download', function(){
+    let id = $(this).closest('li').data('id');
+    location = '/api/download?path=' + encodeURIComponent(id);
+  });
+
+  // 生成分享链接
+  $('#file-list').on('click','.btn-share', function(){
+    let id = $(this).closest('li').data('id');
+    postForm('/api/share',{path:id})
+      .then(r=>JSON.parse(r))
+      .then(o=>prompt('分享链接（30天有效）', o.url))
+      .catch(alert);
+  });
+
+  // 重命名
+  $('#file-list').on('click','.btn-rename', function(){
+    let li = $(this).closest('li'), id = li.data('id');
+    let newname = prompt('新名称', li.find('.file-name').text());
+    if(!newname) return;
+    postForm('/api/rename',{src:id,name:newname})
+      .then(_=> loadTree().then(_=> goPath(currentPath)))
+      .catch(alert);
+  });
+
+  // 删除
+  $('#file-list').on('click','.btn-delete', function(){
+    if(!confirm('确认删除？')) return;
+    let id = $(this).closest('li').data('id');
+    postForm('/api/delete',{path:id})
+      .then(_=> loadTree().then(_=> goPath(currentPath)))
+      .catch(alert);
+  });
+
   // 顶层上传
   $('#uploader').on('change', function(){
-    let f=this.files[0];
-    if(!f) return;
-    let fd=new FormData();
-    fd.append('file', f);
-    fd.append('path', '');
-    fetch('/api/upload', {method:'POST', body:fd})
-      .then(r=>r.text().then(t=>{
-        if(!r.ok) throw t;
-        alert('上传成功');
-        refreshTree();
-      })).catch(alert);
+    let f=this.files[0]; if(!f) return;
+    let fd=new FormData(); fd.append('file',f); fd.append('path','');
+    fetch('/api/upload',{method:'POST',body:fd})
+      .then(r=>r.text().then(t=>{ if(!r.ok) throw t; alert('上传成功'); }))
+      .then(_=> loadTree().then(_=> goPath(currentPath)))
+      .catch(alert);
   });
-  refreshTree();
 });
 </script>
 </body></html>
@@ -501,7 +529,13 @@ TPL_INDEX = """
 <div class="mb-2">
   <input type="file" id="uploader" class="form-control-file">
 </div>
-<div id="jstree"></div>
+<!-- 文件浏览器容器 -->
+<div id="file-browser">
+  <nav aria-label="breadcrumb">
+    <ol class="breadcrumb" id="breadcrumb"></ol>
+  </nav>
+  <ul class="list-group" id="file-list"></ul>
+</div>
 """
 
 # ----------------------------
