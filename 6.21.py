@@ -543,3 +543,751 @@ TPL_INDEX = """
 # ----------------------------
 if __name__ == '__main__':
     app.run(debug=True)
+
+
+
+
+
+
+
+# app.py
+import os
+import shutil
+from flask import (
+    Flask, request, jsonify, send_from_directory, abort,
+    render_template_string
+)
+from werkzeug.utils import secure_filename
+
+app = Flask(__name__)
+ROOT_DIR = os.path.join(os.path.dirname(__file__), "storage")
+os.makedirs(ROOT_DIR, exist_ok=True)
+
+ALLOWED_EXTENSIONS = {
+    'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'mp4', 'avi',
+    'mkv', 'mpeg', 'mov', 'webm'
+}
+TEXT_EXTENSIONS = {'txt', 'md', 'json', 'xml', 'csv', 'log', 'py', 'html', 'js', 'css'}
+
+def safe_path(path: str) -> str:
+    abs_path = os.path.abspath(os.path.join(ROOT_DIR, path))
+    if not abs_path.startswith(os.path.abspath(ROOT_DIR)):
+        raise Exception("非法路径访问")
+    return abs_path
+
+def allowed_file(filename: str) -> bool:
+    ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+    return ext in ALLOWED_EXTENSIONS
+
+def is_text_file(filename: str) -> bool:
+    ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+    return ext in TEXT_EXTENSIONS
+
+def format_size(size: int) -> str:
+    for unit in ['B','KB','MB','GB','TB']:
+        if size < 1024:
+            return f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{size:.1f}PB"
+
+def list_directory(path: str):
+    abs_dir = safe_path(path)
+    if not os.path.isdir(abs_dir):
+        raise Exception("目录不存在")
+    folders, files = [], []
+    for entry in os.listdir(abs_dir):
+        entry_path = os.path.join(abs_dir, entry)
+        stat = os.stat(entry_path)
+        item = {'name': entry, 'mtime': int(stat.st_mtime), 'size': stat.st_size}
+        if os.path.isdir(entry_path):
+            folders.append(item)
+        else:
+            files.append(item)
+    folders.sort(key=lambda x: x['name'].lower())
+    files.sort(key=lambda x: x['name'].lower())
+    return folders, files
+
+@app.route('/')
+def route_index():
+    return render_template_string(MAIN_PAGE_TEMPLATE)
+
+@app.route('/api/list', methods=['GET'])
+def api_list():
+    path = request.args.get('path', '')
+    try:
+        folders, files = list_directory(path)
+        return jsonify({'ok': True, 'path': path, 'folders': folders, 'files': files})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
+@app.route('/api/mkdir', methods=['POST'])
+def api_mkdir():
+    data = request.json or {}
+    path = data.get('path', '')
+    folder_name = (data.get('name') or '').strip()
+    if not folder_name:
+        return jsonify({'ok': False, 'error': '文件夹名不能为空'}), 400
+    if any(c in folder_name for c in r'\/:*?"<>|'):
+        return jsonify({'ok': False, 'error': '文件夹名包含非法字符'}), 400
+    try:
+        abs_dir = safe_path(path)
+        new_folder_path = os.path.join(abs_dir, folder_name)
+        if os.path.exists(new_folder_path):
+            return jsonify({'ok': False, 'error': '文件夹已存在'}), 400
+        os.mkdir(new_folder_path)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
+@app.route('/api/upload', methods=['POST'])
+def api_upload():
+    path = request.form.get('path', '')
+    if 'file' not in request.files:
+        return jsonify({'ok': False, 'error': '未找到文件'}), 400
+    files = request.files.getlist('file')
+    try:
+        abs_dir = safe_path(path)
+        count = 0
+        for f in files:
+            filename = secure_filename(f.filename)
+            if not filename or not allowed_file(filename):
+                return jsonify({'ok': False, 'error': f'文件类型不允许: {filename}'}), 400
+            filepath = os.path.join(abs_dir, filename)
+            if os.path.exists(filepath):
+                name, ext = os.path.splitext(filename)
+                for i in range(1, 1000):
+                    newname = f"{name}({i}){ext}"
+                    filepath = os.path.join(abs_dir, newname)
+                    if not os.path.exists(filepath):
+                        filename = newname
+                        break
+            f.save(filepath)
+            count += 1
+        return jsonify({'ok': True, 'count': count})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
+@app.route('/api/delete', methods=['POST'])
+def api_delete():
+    data = request.json or {}
+    path = data.get('path', '')
+    name = data.get('name')
+    if not name:
+        return jsonify({'ok': False, 'error': '缺少参数name'}), 400
+    try:
+        abs_dir = safe_path(path)
+        target_Path = os.path.join(abs_dir, name)
+        if not os.path.exists(target_Path):
+            return jsonify({'ok': False, 'error': '文件或文件夹不存在'}), 404
+        if os.path.isfile(target_Path):
+            os.remove(target_Path)
+        else:
+            shutil.rmtree(target_Path)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
+@app.route('/api/rename', methods=['POST'])
+def api_rename():
+    data = request.json or {}
+    path = data.get('path', '')
+    oldname = data.get('oldname')
+    newname = (data.get('newname') or '').strip()
+    if not oldname or not newname:
+        return jsonify({'ok': False, 'error': '缺少重命名参数'}), 400
+    if any(c in newname for c in r'\/:*?"<>|'):
+        return jsonify({'ok': False, 'error': '名称包含非法字符'}), 400
+    try:
+        abs_dir = safe_path(path)
+        old_path = os.path.join(abs_dir, oldname)
+        new_path = os.path.join(abs_dir, newname)
+        if not os.path.exists(old_path):
+            return jsonify({'ok': False, 'error': '原文件不存在'}), 404
+        if os.path.exists(new_path):
+            return jsonify({'ok': False, 'error': '新名称已存在'}), 400
+        os.rename(old_path, new_path)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
+@app.route('/api/move', methods=['POST'])
+def api_move():
+    data = request.json or {}
+    src_path = data.get('src_path', '')
+    name = data.get('name')
+    dst_path = data.get('dst_path', '')
+    if not src_path or not dst_path or not name:
+        return jsonify({'ok': False, 'error': '缺少参数'}), 400
+    try:
+        abs_src = safe_path(src_path)
+        abs_dst = safe_path(dst_path)
+        src_file = os.path.join(abs_src, name)
+        if not os.path.exists(src_file):
+            return jsonify({'ok': False, 'error': '源文件不存在'}), 404
+        dst_file = os.path.join(abs_dst, name)
+        if os.path.exists(dst_file):
+            return jsonify({'ok': False, 'error': '目标路径存在同名文件'}), 400
+        shutil.move(src_file, dst_file)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
+@app.route('/download')
+def route_download():
+    path = request.args.get('path', '')
+    name = request.args.get('name', '')
+    if not name:
+        abort(404)
+    try:
+        abs_dir = safe_path(path)
+        return send_from_directory(abs_dir, name, as_attachment=True)
+    except Exception:
+        abort(404)
+
+@app.route('/api/view/text', methods=['GET'])
+def api_view_text():
+    path = request.args.get('path', '')
+    name = request.args.get('name', '')
+    if not name:
+        return jsonify({'ok': False, 'error': '必须提供文件名'}), 400
+    try:
+        abs_dir = safe_path(path)
+        filepath = os.path.join(abs_dir, name)
+        if not os.path.isfile(filepath) or not is_text_file(name):
+            return jsonify({'ok': False, 'error': '文件不存在或不可查看'}), 404
+        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+        return jsonify({'ok': True, 'content': content})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
+@app.route('/api/save/text', methods=['POST'])
+def api_save_text():
+    data = request.json or {}
+    path = data.get('path', '')
+    name = data.get('name')
+    content = data.get('content', '')
+    if not name:
+        return jsonify({'ok': False, 'error': '必须提供文件名'}), 400
+    if not is_text_file(name):
+        return jsonify({'ok': False, 'error': '仅支持文本文件保存'}), 400
+    try:
+        abs_dir = safe_path(path)
+        filepath = os.path.join(abs_dir, name)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 400
+
+@app.route('/file/<path:filepath>')
+def route_file(filepath):
+    try:
+        abs_fp = safe_path(filepath)
+        if not os.path.isfile(abs_fp):
+            abort(404)
+        return send_from_directory(ROOT_DIR, filepath)
+    except Exception:
+        abort(404)
+
+MAIN_PAGE_TEMPLATE = r"""
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Flask 云盘示例</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" rel="stylesheet"/>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css" rel="stylesheet"/>
+<style>
+  body {padding:10px; background:#f8f9fa;}
+  .file-list li:hover {background:#e9ecef;}
+  .file-list li.dragging {opacity:0.4;}
+  .context-menu {
+    position: fixed;
+    z-index: 1050;
+    display:none;
+    background: white;
+    border: solid 1px #ccc;
+    border-radius: 3px;
+    box-shadow: 2px 2px 8px rgba(0,0,0,0.15);
+    width:150px;
+  }
+  .context-menu ul {
+    list-style:none;
+    margin:0; padding:5px 0;
+  }
+  .context-menu ul li {
+    padding: 6px 12px;
+    cursor:pointer;
+  }
+  .context-menu ul li:hover {
+    background:#007bff;
+    color:#fff;
+  }
+  #breadcrumb a {
+    cursor:pointer;
+  }
+  #viewer {
+    max-height: 60vh;
+    overflow:auto;
+  }
+  #viewer img, #viewer video {
+    max-width: 100%;
+    max-height: 60vh;
+  }
+  #text-editor {
+    height: 400px;
+    width: 100%;
+    font-family: monospace;
+    white-space: pre-wrap;
+    background: #fff;
+    border: 1px solid #ccc;
+    padding: 10px;
+    box-sizing: border-box;
+  }
+</style>
+</head>
+<body>
+<h3 class="mb-3"><i class="fas fa-hdd"></i> Flask 云盘示例</h3>
+
+<nav aria-label="breadcrumb">
+  <ol class="breadcrumb" id="breadcrumb"></ol>
+</nav>
+
+<div class="mb-3">
+  <input type="file" id="file-upload" style="display:none;" multiple webkitdirectory directory />
+  <button id="btn-upload" class="btn btn-primary btn-sm"><i class="fas fa-upload"></i> 上传文件/文件夹</button>
+  <button id="btn-newfolder" class="btn btn-success btn-sm"><i class="fas fa-folder-plus"></i> 新建文件夹</button>
+  <button id="btn-refresh" class="btn btn-outline-secondary btn-sm"><i class="fas fa-sync-alt"></i> 刷新</button>
+</div>
+
+<ul class="list-group file-list" id="file-list" style="user-select:none;"></ul>
+
+<hr/>
+
+<div id="viewer-section" style="display:none;">
+  <h5>文件查看器</h5>
+  <div id="viewer"></div>
+  <button id="btn-close-viewer" class="btn btn-secondary btn-sm mt-2">关闭查看器</button>
+</div>
+
+<div id="edit-section" style="display:none;">
+  <h5>文本编辑器</h5>
+  <div>
+    <textarea id="text-editor"></textarea>
+  </div>
+  <button id="btn-save-text" class="btn btn-primary btn-sm mt-2">保存</button>
+  <button id="btn-close-editor" class="btn btn-secondary btn-sm mt-2">关闭编辑器</button>
+</div>
+
+<div class="context-menu" id="context-menu">
+  <ul>
+    <li data-action="upload">上传文件/文件夹</li>
+    <li data-action="newfolder">新建文件夹</li>
+    <li data-action="rename">重命名</li>
+    <li data-action="delete" style="color:#c00;">删除</li>
+  </ul>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/jquery@3.6.1/dist/jquery.min.js"></script>
+<script>
+const rootPath = "";
+let currentPath = "";
+let selectedItem = null;
+
+function escapeHtml(str) {
+  if (!str) return "";
+  return str.replace(/[&<>"']/g, m=>{
+    switch(m){
+      case '&':return '&amp;';
+      case '<':return '&lt;';
+      case '>':return '&gt;';
+      case '"':return '&quot;';
+      case "'":return '&#39;';
+      default: return m;
+    }
+  });
+}
+
+function formatDate(ts){
+  let d= new Date(ts*1000);
+  return d.toLocaleString();
+}
+
+function refreshList(path){
+  if(path === undefined) path = currentPath;
+  $.getJSON('/api/list', {path: path}, function(res){
+    if(!res.ok){alert(res.error);return;}
+    currentPath = res.path;
+    renderBreadcrumb(currentPath);
+    renderFileList(res.folders, res.files);
+    selectedItem = null;
+  }).fail(xhr=>{
+    alert('加载失败:'+(xhr.responseJSON?.error || xhr.statusText));
+  });
+}
+
+function renderBreadcrumb(path){
+  let crumbs = path.split('/').filter(x => x.length > 0);
+  let html = `<li class="breadcrumb-item"><a href="#" data-path="">根目录</a></li>`;
+  let acc = "";
+  crumbs.forEach((c,i)=>{
+    acc += "/" + c;
+    if(i === crumbs.length-1){
+      html += `<li class="breadcrumb-item active" aria-current="page">${escapeHtml(c)}</li>`;
+    } else {
+      html += `<li class="breadcrumb-item"><a href="#" data-path="${acc}">${escapeHtml(c)}</a></li>`;
+    }
+  });
+  $('#breadcrumb').html(html);
+}
+
+$('#breadcrumb').on('click', 'a', function(e){
+  e.preventDefault();
+  let path= $(this).data('path');
+  refreshList(path);
+});
+
+function renderFileList(folders, files){
+  let ul = $('#file-list').empty();
+  folders.forEach(f=>{
+    let li = $(`
+      <li class="list-group-item d-flex justify-content-between align-items-center" draggable="true" data-type="folder" data-name="${escapeHtml(f.name)}">
+        <span><i class="fas fa-folder"></i> ${escapeHtml(f.name)}</span>
+        <small class="text-muted">${formatDate(f.mtime)}</small>
+      </li>`);
+    ul.append(li);
+  });
+  files.forEach(f=>{
+    let ext = f.name.split('.').pop().toLowerCase();
+    let icon = 'fa-file';
+    if(['png','jpg','jpeg','gif','bmp'].includes(ext)) icon='fa-file-image';
+    else if(['mp4','avi','mkv','webm','mov'].includes(ext)) icon='fa-file-video';
+    else if(['txt','md','json','xml','csv','log','py','html','js','css'].includes(ext)) icon = 'fa-file-alt';
+    let li = $(`
+      <li class="list-group-item d-flex justify-content-between align-items-center" draggable="true" data-type="file" data-name="${escapeHtml(f.name)}">
+        <span><i class="fas ${icon}"></i> ${escapeHtml(f.name)}</span>
+        <small class="text-muted">${formatDate(f.mtime)} / ${(f.size/1024).toFixed(1)} KB</small>
+      </li>`);
+    ul.append(li);
+  });
+}
+
+$('#file-list').on('click', 'li', function(){
+  let type = $(this).data('type');
+  let name = $(this).data('name');
+  if(type === 'folder'){
+    let newPath = currentPath ? currentPath + '/' + name : name;
+    refreshList(newPath);
+  } else {
+    openFileViewer(name);
+  }
+});
+
+function openFileViewer(filename){
+  let ext = filename.split('.').pop().toLowerCase();
+  if(['png','jpg','jpeg','gif','bmp'].includes(ext)){
+    $("#viewer").html(`<img src="/file/${encodeURI(currentPath? currentPath+"/"+filename:filename)}" alt="">`);
+    showViewer();
+  } else if(['mp4','avi','mkv','webm','mov'].includes(ext)){
+    $("#viewer").html(`
+      <video controls autoplay style="max-width:100%;max-height:60vh">
+        <source src="/file/${encodeURI(currentPath? currentPath+"/"+filename:filename)}" />
+        您的浏览器不支持视频播放。
+      </video>
+    `);
+    showViewer();
+  } else if(isTextExtension(ext)){
+    $.getJSON('/api/view/text', {path: currentPath, name: filename}, function(res){
+      if(res.ok){
+        $("#text-editor").val(res.content).data('filename', filename);
+        showEditor();
+      } else {
+        alert("加载文件失败：" + res.error);
+      }
+    }).fail(()=>alert("加载文件失败"));
+  } else {
+    alert("不支持在线预览此文件类型。");
+  }
+}
+
+function isTextExtension(ext){
+  return ['txt','md','json','xml','csv','log','py','html','js','css'].includes(ext);
+}
+
+function showViewer(){
+  $('#viewer-section').show();
+  $('#edit-section').hide();
+  clearSelection();
+}
+function showEditor(){
+  $('#edit-section').show();
+  $('#viewer-section').hide();
+  clearSelection();
+}
+
+$('#btn-close-viewer').click(() => {
+  $('#viewer-section').hide();
+  clearSelection();
+});
+$('#btn-close-editor').click(() => {
+  $('#edit-section').hide();
+  clearSelection();
+});
+$('#btn-save-text').click(() => {
+  let content = $('#text-editor').val();
+  let filename = $('#text-editor').data('filename');
+  if(!filename){
+    alert("无效文件");
+    return;
+  }
+  $.ajax({
+    url: '/api/save/text',
+    type: 'POST',
+    contentType: 'application/json',
+    data: JSON.stringify({path: currentPath, name: filename, content}),
+    success(res){
+      if(res.ok){
+        alert('保存成功');
+      } else {
+        alert('保存失败: ' + res.error);
+      }
+    },
+    error(xhr){
+      alert('保存失败: ' + (xhr.responseJSON?.error || xhr.statusText));
+    }
+  });
+});
+
+function clearSelection(){
+  selectedItem=null;
+  $('.file-list li').removeClass('active');
+  hideContextMenu();
+}
+
+$('#btn-upload').click(()=>$('#file-upload').click());
+$('#file-upload').change(function(){
+  if(this.files.length === 0) return;
+  uploadFiles(this.files);
+  $(this).val('');
+});
+
+function uploadFiles(files){
+  let formData = new FormData();
+  for(let f of files) formData.append('file', f);
+  formData.append('path', currentPath);
+  $.ajax({
+    url: '/api/upload',
+    type: 'POST',
+    processData: false,
+    contentType: false,
+    data: formData,
+    success(res){
+      if(res.ok){
+        alert(`${res.count} 个文件上传成功`);
+        refreshList();
+      } else {
+        alert('上传失败: ' + res.error);
+      }
+    },
+    error(xhr){
+      alert('上传失败: ' + (xhr.responseJSON?.error || xhr.statusText));
+    }
+  });
+}
+
+$('#btn-newfolder').click(() => {
+  let folderName = prompt('请输入文件夹名称:');
+  if(!folderName) return;
+  folderName = folderName.trim();
+  if(!folderName){
+    alert('名称不能为空');
+    return;
+  }
+  $.ajax({
+    url: '/api/mkdir',
+    type: 'POST',
+    contentType: 'application/json',
+    data: JSON.stringify({path: currentPath, name: folderName}),
+    success(res){
+      if(res.ok){
+        alert('创建成功');
+        refreshList();
+      } else {
+        alert('创建失败: ' + res.error);
+      }
+    },
+    error(xhr){
+      alert('创建失败: ' + (xhr.responseJSON?.error || xhr.statusText));
+    }
+  });
+});
+
+$('#btn-refresh').click(() => refreshList());
+
+let contextMenu = $('#context-menu');
+$('#file-list').on('contextmenu', 'li', function(e){
+  e.preventDefault();
+  selectedItem = $(this);
+  $('.file-list li').removeClass('active');
+  selectedItem.addClass('active');
+  showContextMenu(e.pageX, e.pageY);
+});
+
+$('#file-list').on('contextmenu', function(e){
+  if(e.target === this){
+    selectedItem = null;
+    $('.file-list li').removeClass('active');
+    showContextMenu(e.pageX, e.pageY, true);
+    e.preventDefault();
+  }
+});
+
+function showContextMenu(x,y,isRoot=false){
+  if(isRoot){
+    contextMenu.find('[data-action="rename"], [data-action="delete"]').hide();
+  } else {
+    contextMenu.find('[data-action="rename"], [data-action="delete"]').show();
+  }
+  contextMenu.css({top: y + 'px', left: x + 'px'}).show();
+}
+function hideContextMenu(){
+  contextMenu.hide();
+}
+$(window).click(hideContextMenu);
+
+contextMenu.on('click', 'li', function(){
+  const action = $(this).data('action');
+  if(action === 'upload'){
+    $('#file-upload').click();
+  } else if(action === 'newfolder'){
+    let fname = prompt('请输入文件夹名称:');
+    if(!fname) return;
+    fname = fname.trim();
+    if(!fname){
+      alert('名称不能为空');
+      return;
+    }
+    $.ajax({
+      url: '/api/mkdir',
+      contentType: 'application/json',
+      type: 'POST',
+      data: JSON.stringify({path: currentPath, name: fname}),
+      success(res){
+        if(res.ok){
+          alert('创建成功');
+          refreshList();
+        } else {
+          alert('创建失败: ' + res.error);
+        }
+      }
+    });
+  } else if(action === 'rename'){
+    if(!selectedItem){
+      alert('未选择文件');
+      return;
+    }
+    let oldname = selectedItem.data('name');
+    let newname = prompt('请输入新名称:', oldname);
+    if(!newname)return;
+    newname = newname.trim();
+    if(newname === oldname)return;
+    $.ajax({
+      url: '/api/rename',
+      contentType: 'application/json',
+      type: 'POST',
+      data: JSON.stringify({path: currentPath, oldname, newname}),
+      success(res){
+        if(res.ok){
+          alert('重命名成功');
+          refreshList();
+        } else {
+          alert('重命名失败: ' + res.error);
+        }
+      }
+    });
+  } else if(action === 'delete'){
+    if(!selectedItem){
+      alert('未选择文件');
+      return;
+    }
+    let delname = selectedItem.data('name');
+    if(!confirm(`确定删除【${delname}】吗？此操作不可恢复！`)) return;
+    $.ajax({
+      url: '/api/delete',
+      contentType: 'application/json',
+      type: 'POST',
+      data: JSON.stringify({path: currentPath, name: delname}),
+      success(res){
+        if(res.ok){
+          alert('删除成功');
+          refreshList();
+        } else {
+          alert('删除失败: ' + res.error);
+        }
+      }
+    });
+  }
+  hideContextMenu();
+});
+
+let dragSrc = null;
+$('#file-list').on('dragstart', 'li', function(e){
+  dragSrc = this;
+  $(this).addClass('dragging');
+  e.originalEvent.dataTransfer.effectAllowed = 'move';
+  e.originalEvent.dataTransfer.setData('text/plain', $(this).data('name'));
+});
+$('#file-list').on('dragend', 'li', function(){
+  $(this).removeClass('dragging');
+  dragSrc = null;
+});
+
+$('#file-list').on('dragover', 'li', function(e){
+  e.preventDefault();
+  if(this === dragSrc) return;
+  if($(this).data('type') !== 'folder') return;
+  $(this).addClass('drag-over');
+});
+$('#file-list').on('dragleave', 'li', function(){
+  $(this).removeClass('drag-over');
+});
+$('#file-list').on('drop', 'li', function(e){
+  e.preventDefault();
+  $(this).removeClass('drag-over');
+  if(!dragSrc) return;
+  if($(this).data('type') !== 'folder') return;
+  let srcName = $(dragSrc).data('name');
+  let dstFolder = currentPath ? currentPath + '/' + $(this).data('name') : $(this).data('name');
+  if(!confirm(`确认将【${srcName}】移动到【${dstFolder}】吗？`)) return;
+  $.ajax({
+    url: '/api/move',
+    contentType: 'application/json',
+    type: 'POST',
+    data: JSON.stringify({src_path: currentPath, name: srcName, dst_path: dstFolder}),
+    success(res){
+      if(res.ok){
+        alert('移动成功');
+        refreshList();
+      } else {
+        alert('移动失败: '+ res.error);
+      }
+    }
+  });
+  dragSrc = null;
+});
+
+$(function(){
+  refreshList();
+});
+</script>
+</body>
+</html>
+"""
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
+
+
+
